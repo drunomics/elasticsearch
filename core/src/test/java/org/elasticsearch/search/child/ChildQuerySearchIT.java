@@ -38,6 +38,7 @@ import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.index.search.child.ScoreType;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.script.Script;
+import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.aggregations.AggregationBuilders;
 import org.elasticsearch.search.aggregations.bucket.filter.Filter;
 import org.elasticsearch.search.aggregations.bucket.global.Global;
@@ -2037,4 +2038,49 @@ public class ChildQuerySearchIT extends ESIntegTestCase {
         return hasChildQueryBuilder;
     }
 
+    // Tests #16550
+    public void testHasChildWithNonDefaultGlobalSimilarity() {
+      assertAcked(prepareCreate("test").setSettings(settingsBuilder().put(indexSettings())
+          .put("index.similarity.default.type", "BM25"))
+          .addMapping("parent")
+          .addMapping("child", "_parent", "type=parent", "c_field", "type=string"));
+      ensureGreen();
+
+      verifyNonDefaultSimilarity();
+    }
+
+    // Tests #16550
+    public void testHasChildWithNonDefaultFieldSimilarity() {
+      assertAcked(prepareCreate("test")
+          .addMapping("parent")
+          .addMapping("child", "_parent", "type=parent", "c_field", "type=string,similarity=BM25"));
+      ensureGreen();
+
+      verifyNonDefaultSimilarity();
+    }
+
+    // Tests #16550
+    private void verifyNonDefaultSimilarity() {
+      client().prepareIndex("test", "parent", "p1").setSource("p_field", "p_value1").get();
+      client().prepareIndex("test", "child", "c1").setSource("c_field", "c_value").setParent("p1").get();
+      client().prepareIndex("test", "child", "c2").setSource("c_field", "c_value").setParent("p1").get();
+      refresh();
+
+      // baseline: sum of scores of matching child docs outside of has_child query
+      SearchResponse searchResponse = client().prepareSearch("test")
+          .setTypes("child")
+          .setQuery(matchQuery("c_field", "c_value"))
+          .get();
+      assertSearchHits(searchResponse, "c1", "c2");
+      Float childSum = 0f;
+      for (SearchHit hit : searchResponse.getHits().getHits())
+          childSum += hit.getScore();
+
+      // compare baseline to has_child with 'total' score_mode
+      searchResponse = client().prepareSearch("test")
+          .setQuery(hasChildQuery("child", matchQuery("c_field", "c_value")).scoreMode("sum"))
+          .get();
+      assertSearchHits(searchResponse, "p1");
+      assertThat(searchResponse.getHits().hits()[0].score(), equalTo(childSum));
+    }
 }
